@@ -76,8 +76,8 @@ jobs:
       - name: Discover current Snapshot builds
         id: config
         env:
-          TARGETS: ${{ needs.prepare.outputs.targets }}
-          SUBTARGETS: ${{ needs.prepare.outputs.subtargets }}
+          TARGETS: "armsr"
+          SUBTARGETS: "armv8"
         run: node snapshot-index.js "$TARGETS" "$SUBTARGETS"
 
   build:
@@ -90,18 +90,9 @@ jobs:
         build_env: ${{ fromJson(needs.discover.outputs.job-config) }}
 
     steps:
-      - name: Check whether this Snapshot ABI is already published
+      - name: Force Build Process
         id: existing
-        uses: actions/github-script@v7
-        env:
-          RELEASE_TAG: ${{ matrix.build_env.releaseTag }}
-          ARTIFACT_POSTFIX: ${{ matrix.build_env.artifactPostfix }}
-        with:
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          result-encoding: string
-          script: |
-            // Всегда пересобирать, игнорируя проверку официальных релизов OpenWrt
-            return false;
+        run: echo "Starting build for custom kernel target..."
 
       - name: Checkout AWG source code
         uses: actions/checkout@v7
@@ -111,20 +102,21 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y python3-pyelftools zstd
 
-      - name: Download and extract Custom Ophub SDK
+      - name: Download and extract OpenWrt Snapshot SDK
         env:
-          SDK_FILE: "openwrt-sdk-amlogic.tar.xz"
-          SDK_URL: "https://github.com"
+          SDK_FILE: ${{ matrix.build_env.sdkFile }}
+          SDK_URL: ${{ matrix.build_env.sdkUrl }}
         run: |
           set -euo pipefail
-          echo "Downloading custom SDK for kernel 6.18.52..."
-          wget -O "$SDK_FILE" "$SDK_URL"
-          
-          # Создаем корректное имя папки, чтобы последующие шаги скрипта (find .) смогли её найти
-          mkdir -p openwrt-sdk-amlogic_aarch64
-          tar -xf "$SDK_FILE" -C openwrt-sdk-amlogic_aarch64 --strip-components=1
+          wget -O "$"$SDK_FILE"" "$SDK_URL"
 
-      - name: Configure Snapshot SDK
+          case "$"$SDK_FILE"" in
+            *.tar.zst) tar --zstd -xf "$"$SDK_FILE"" ;;
+            *.tar.xz) tar -xf "$"$SDK_FILE"" ;;
+            *) echo "Unsupported SDK archive: $SDK_FILE"; exit 1 ;;
+          esac
+
+      - name: Configure Snapshot SDK and Spoof Kernel Vermagic
         run: |
           set -euo pipefail
           SDK_DIR=$(find . -maxdepth 1 -name "openwrt-sdk-*" -type d -print -quit)
@@ -150,6 +142,13 @@ jobs:
           } > .config
           make defconfig
 
+          # ХАК ЯДРА: Подменяем оригинальный вермагик SDK на хэш вашего роутера
+          echo "Принудительно внедряем хэш ядра: 2e107f3f74eefa4459193e9332551c74"
+          sed -i 's/$.*VERMAGIC.*/2e107f3f74eefa4459193e9332551c74/g' include/kernel-defaults.mk
+          if [ -f .config ]; then
+             sed -i 's/CONFIG_KERNEL_VERMAGIC.*/CONFIG_KERNEL_VERMAGIC="2e107f3f74eefa4459193e9332551c74"/g' .config
+          fi
+
       - name: Build AmneziaWG packages
         run: |
           set -euo pipefail
@@ -165,7 +164,7 @@ jobs:
 
       - name: Prepare Snapshot artifacts
         env:
-          ARTIFACT_POSTFIX: "custom_aarch64"
+          ARTIFACT_POSTFIX: "amlogic_6.18.52"
         run: |
           set -euo pipefail
           SDK_DIR=$(find . -maxdepth 1 -name "openwrt-sdk-*" -type d -print -quit)
@@ -222,14 +221,14 @@ jobs:
             exit 0
           fi
 
-          RELEASE_TAG="amlogic-6.18.52-custom"
+          RELEASE_TAG="amlogic-6.18.52-fixed"
 
           if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
             gh release create "$RELEASE_TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" \
-              --title "AmneziaWG for Kernel 6.18.52 (Ophub)" \
-              --notes "Custom AmneziaWG .apk packages compiled using lynya55/amlogic-s9xxx-openwrt SDK. Compatible with kernel 6.18.52 (ABI provider 2e107f3f / 7f81ae55)." \
+              --title "AmneziaWG for Kernel 6.18.52-ophub" \
+              --notes "Automated AmneziaWG .apk packages with injected kernel provider hash: 2e107f3f74eefa4459193e9332551c74." \
               --prerelease
           fi
 
